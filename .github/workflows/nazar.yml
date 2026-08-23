@@ -1,0 +1,95 @@
+name: nazar
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  schedule:
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  scan:
+    name: security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Check out nazar
+        uses: actions/checkout@v4
+        with:
+          repository: tremfs/nazar
+          path: .nazar-tool
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Scan
+        id: scan
+        run: |
+          node .nazar-tool/src/index.mjs scan . \
+            --sarif nazar.sarif \
+            --md nazar-report.md \
+            --short || echo "findings=1" >> "$GITHUB_OUTPUT"
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: nazar.sarif
+          category: nazar
+
+      - name: Keep the report as an artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nazar-report
+          path: |
+            nazar-report.md
+            nazar.sarif
+          retention-days: 30
+
+      - name: Comment on the pull request
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body;
+            try {
+              body = fs.readFileSync('nazar-report.md', 'utf8');
+            } catch {
+              return;
+            }
+            if (body.includes('No findings.')) return;
+
+            const marker = '<!-- nazar-report -->';
+            const trimmed = body.length > 60000 ? body.slice(0, 60000) + '\n\n_…truncated._' : body;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const existing = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const mine = existing.data.find((c) => c.body.startsWith(marker));
+            const payload = `${marker}\n${trimmed}`;
+
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body: payload });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: payload });
+            }
+
+      - name: Fail on high or critical findings
+        run: |
+          node .nazar-tool/src/index.mjs scan . --fail-on critical --quiet --no-net
