@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -132,11 +133,27 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int));
 
 /*** terminal ***/
 
+volatile sig_atomic_t resize_pending = 0;
+
+void handleSigWinch(int signum) {
+	(void)signum;
+	resize_pending = 1;
+}
+
 void die(const char *s) {
 	write(STDOUT_FILENO, "\x1b[2J", 4);
 	write(STDOUT_FILENO, "\x1b[H", 3);
 	perror(s);
 	exit(1);
+}
+
+void enableWindowResize(void) {
+	struct sigaction sa;
+	sa.sa_handler = handleSigWinch;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0; /* no SA_RESTART, so a resize interrupts the blocking read */
+	if (sigaction(SIGWINCH, &sa, NULL) == -1)
+		die("sigaction");
 }
 
 void disableRawMode(void) {
@@ -158,10 +175,33 @@ void enableRawMode(void) {
 		die("tcsetattr");
 }
 
+int getWindowSize(int *rows, int *cols) {
+	struct winsize ws;
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0)
+		return -1;
+	*cols = ws.ws_col;
+	*rows = ws.ws_row;
+	return 0;
+}
+
+void editorUpdateWindowSize(void) {
+	if (getWindowSize(&E.screenrows, &E.screencols) == -1)
+		die("getWindowSize");
+	E.screenrows -= 2;
+}
+
 int editorReadKey(void) {
 	int nread;
 	char c;
 	while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+		if (nread == -1 && errno == EINTR) {
+			if (resize_pending) {
+				resize_pending = 0;
+				editorUpdateWindowSize();
+				editorRefreshScreen();
+			}
+			continue;
+		}
 		if (nread == -1 && errno != EAGAIN)
 			die("read");
 	}
@@ -207,15 +247,6 @@ int editorReadKey(void) {
 		return '\x1b';
 	}
 	return c;
-}
-
-int getWindowSize(int *rows, int *cols) {
-	struct winsize ws;
-	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0)
-		return -1;
-	*cols = ws.ws_col;
-	*rows = ws.ws_row;
-	return 0;
 }
 
 /*** syntax highlighting ***/
@@ -1042,13 +1073,12 @@ void initEditor(void) {
 	E.statusmsg_time = 0;
 	E.syntax = NULL;
 
-	if (getWindowSize(&E.screenrows, &E.screencols) == -1)
-		die("getWindowSize");
-	E.screenrows -= 2;
+	editorUpdateWindowSize();
 }
 
 int main(int argc, char *argv[]) {
 	enableRawMode();
+	enableWindowResize();
 	initEditor();
 	if (argc >= 2)
 		editorOpen(argv[1]);

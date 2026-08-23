@@ -21,6 +21,7 @@ Structure follows antirez's [kilo](https://github.com/antirez/kilo).
 Work in progress. Done so far:
 
 - Raw-mode terminal handling (termios)
+- Live terminal resize (SIGWINCH)
 - Flicker-free full-screen drawing from a single buffer
 - Open, edit and save files
 - Tab-aware rendering, vertical and horizontal scrolling
